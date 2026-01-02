@@ -197,6 +197,81 @@ module.exports = (client) => {
         res.redirect('/afk');
     });
 
+    // --- MUSIC Routes ---
+
+    app.get('/music', (req, res) => {
+        if (!client.user) return res.send('Bot loading...');
+        res.render('music', {
+            user: client.user,
+            page: 'music'
+        });
+    });
+
+    app.get('/api/music/status', (req, res) => {
+        const queues = client.queueManager ? client.queueManager.getAll() : new Map();
+
+        let musicData = {
+            connected: !!client.lavalink,
+            voiceChannel: null,
+            nowPlaying: null,
+            queue: [],
+            queueCount: 0
+        };
+
+        // Get first active queue (for simplicity, you can enhance this later)
+        for (const [guildId, queue] of queues) {
+            if (queue.nowPlaying) {
+                musicData.voiceChannel = `Guild: ${guildId}`;
+                musicData.nowPlaying = {
+                    title: queue.nowPlaying.info.title,
+                    author: queue.nowPlaying.info.author
+                };
+                musicData.queue = queue.songs.map(song => ({
+                    title: song.info.title,
+                    author: song.info.author
+                }));
+                musicData.queueCount = queue.songs.length;
+                break; // Only show first active queue
+            }
+        }
+
+        res.json(musicData);
+    });
+
+    app.post('/api/music/stop', async (req, res) => {
+        try {
+            const queues = client.queueManager ? client.queueManager.getAll() : new Map();
+            let stopped = false;
+
+            for (const [guildId, queue] of queues) {
+                if (queue.nowPlaying) {
+                    if (client.lavalink) {
+                        await client.lavalink.destroyPlayer(guildId);
+                    }
+                    client.queueManager.delete(guildId);
+
+                    // Try to disconnect from voice
+                    const { getVoiceConnection } = require('@discordjs/voice');
+                    const connection = getVoiceConnection(guildId);
+                    if (connection) {
+                        connection.destroy();
+                    }
+
+                    stopped = true;
+                }
+            }
+
+            if (stopped) {
+                res.json({ success: true, message: 'Music stopped' });
+            } else {
+                res.json({ success: false, message: 'No music is playing' });
+            }
+        } catch (error) {
+            console.error('Error stopping music:', error);
+            res.json({ success: false, message: error.message });
+        }
+    });
+
     app.listen(port, () => {
         console.log(`Dashboard is running on http://localhost:${port}`);
     });

@@ -7,7 +7,28 @@ const client = new Client({
     checkUpdate: false
 });
 
+// Initialize music system
+const Lavalink = require('./music/lavalink');
+const queueManager = require('./music/queue');
+
+// Initialize Lavalink if configured
+let lavalink = null;
+if (process.env.LAVALINK_WS && process.env.LAVALINK_REST && process.env.LAVALINK_PASSWORD) {
+    lavalink = new Lavalink({
+        restHost: process.env.LAVALINK_REST,
+        wsHost: process.env.LAVALINK_WS,
+        password: process.env.LAVALINK_PASSWORD,
+        clientName: process.env.CLIENT_NAME || 'RoxyPlus',
+    });
+}
+
+// Voice states storage
+const voiceStates = {};
+
 client.commands = new Map();
+client.lavalink = lavalink;
+client.queueManager = queueManager;
+client.voiceStates = voiceStates;
 
 function loadAllowedUsers() {
     try {
@@ -53,9 +74,88 @@ client.on('ready', () => {
     console.log('Roxy+ is ready!');
     console.log('Loaded ' + client.commands.size + ' commands');
 
+    // Connect to Lavalink if available
+    if (client.lavalink) {
+        client.lavalink.connect(client.user.id);
+        console.log('Connecting to Lavalink...');
+    }
+
     // Start Dashboard
     dashboard(client);
 });
+
+// Voice state handling for Lavalink
+if (client.lavalink) {
+    client.ws.on('VOICE_STATE_UPDATE', (packet) => {
+        if (packet.user_id !== client.user.id) return;
+
+        const guildId = packet.guild_id;
+        if (!voiceStates[guildId]) voiceStates[guildId] = {};
+        voiceStates[guildId].sessionId = packet.session_id;
+        console.log(`[Voice] State update for guild ${guildId}`);
+    });
+
+    client.ws.on('VOICE_SERVER_UPDATE', (packet) => {
+        const guildId = packet.guild_id;
+        if (!voiceStates[guildId]) voiceStates[guildId] = {};
+        voiceStates[guildId].token = packet.token;
+        voiceStates[guildId].endpoint = packet.endpoint;
+        console.log(`[Voice] Server update for guild ${guildId}`);
+    });
+
+    // Lavalink event handlers
+    client.lavalink.on('ready', () => {
+        console.log('[Lavalink] Session established');
+    });
+
+    client.lavalink.on('event', async (evt) => {
+        console.log(`[Lavalink Event] Type: ${evt.type}, Guild: ${evt.guildId}`);
+
+        if (evt.type === 'TrackEndEvent') {
+            if (evt.reason === 'finished' || evt.reason === 'loadFailed') {
+                const queue = queueManager.get(evt.guildId);
+                if (!queue) return;
+
+                const nextSong = queueManager.getNext(evt.guildId);
+
+                if (!nextSong) {
+                    await client.lavalink.destroyPlayer(evt.guildId);
+                    queueManager.delete(evt.guildId);
+                    if (queue.textChannel) {
+                        queue.textChannel.send('```Queue finished```');
+                    }
+                    return;
+                }
+
+                queue.nowPlaying = nextSong;
+                const voiceState = voiceStates[evt.guildId];
+
+                if (voiceState && voiceState.token && voiceState.sessionId && voiceState.endpoint) {
+                    try {
+                        await client.lavalink.updatePlayer(evt.guildId, nextSong, voiceState, {
+                            volume: queue.volume,
+                            filters: queue.filters
+                        });
+
+                        if (queue.textChannel) {
+                            let nowPlayingMsg = '```\n';
+                            nowPlayingMsg += '╭─[ NOW PLAYING ]─╮\n\n';
+                            nowPlayingMsg += `  🎵 ${nextSong.info.title}\n`;
+                            nowPlayingMsg += `  👤 ${nextSong.info.author}\n`;
+                            nowPlayingMsg += '\n╰──────────────────────────────────╯\n```';
+                            queue.textChannel.send(nowPlayingMsg);
+                        }
+                    } catch (err) {
+                        console.error('[Auto-play Error]:', err);
+                        if (queue.textChannel) {
+                            queue.textChannel.send('```Error playing next song```');
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
 
 // AFK & Logging Logic
 const respondedUsers = new Set();
