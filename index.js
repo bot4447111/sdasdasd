@@ -95,6 +95,10 @@ client.on('ready', () => {
     const mirrorManager = require('./commands/mirrorManager');
     mirrorManager.initialize(client);
 
+    // Initialize Waifu/Fun System
+    const waifuManager = require('./commands/waifuManager');
+    waifuManager.initialize(client);
+
     // Start Dashboard
     dashboard(client);
 });
@@ -185,9 +189,14 @@ if (client.lavalink) {
 }
 
 // AFK & Logging Logic
-const respondedUsers = new Set();
-// Clear responded users every 1 hour
-setInterval(() => respondedUsers.clear(), 3600000);
+const afkCooldowns = new Map();
+// Cleanup old cooldowns every hour
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, time] of afkCooldowns) {
+        if (now - time > 3600000) afkCooldowns.delete(id);
+    }
+}, 3600000);
 
 client.on('messageCreate', async (message) => {
     try {
@@ -255,15 +264,44 @@ client.on('messageCreate', async (message) => {
             }
 
             // 2. AFK REPLY
-            if (afkData.isOn && !respondedUsers.has(message.author.id)) {
-                const reason = afkData.reason || "I'm currently AFK.";
-                try {
-                    await message.reply(`**[AFK]** ${reason}`);
-                    respondedUsers.add(message.author.id);
-                } catch (err) {
-                    console.error('Failed to reply to AFK ping:', err);
+            if (afkData.isOn) {
+                const now = Date.now();
+                const lastReply = afkCooldowns.get(message.author.id) || 0;
+                // If dashboard didn't write startTime, default to 0 (so logic still works)
+                const startTime = afkData.startTime || 0;
+                const cooldown = 5 * 60 * 1000; // 5 minutes
+
+                // Reply if:
+                // 1. It's been more than 5 minutes since last reply
+                // OR
+                // 2. The AFK session started AFTER the last reply (meaning it was reset)
+                if (now - lastReply >= cooldown || lastReply < startTime) {
+                    const reason = afkData.reason || "I'm currently AFK.";
+                    try {
+                        // Removed [AFK] prefix as requested
+                        await message.reply(`${reason}`);
+                        afkCooldowns.set(message.author.id, now);
+                    } catch (err) {
+                        console.error('Failed to reply to AFK ping:', err);
+                    }
                 }
             }
+        }
+
+        // --- CALCULATOR SYSTEM (Prefix-less) ---
+        if (isAllowedUser(message.author.id)) {
+            const calculator = require('./commands/calculator');
+            // If calculator handled it, return to prevent other command processing (optional, but safe)
+            const handled = await calculator.handle(message);
+            if (handled) return;
+
+            const currency = require('./commands/currency');
+            const currencyHandled = await currency.handle(message);
+            if (currencyHandled) return;
+
+            const qrManager = require('./commands/qrManager');
+            const qrHandled = await qrManager.handle(message, client, true);
+            if (qrHandled) return;
         }
 
         // --- COMMAND HANDLER ---
@@ -278,6 +316,50 @@ client.on('messageCreate', async (message) => {
         }
 
         const command = client.commands.get(commandName);
+
+        // --- CLIPBOARD MANAGER START ---
+        if (!command) {
+            const clipboardManager = require('./commands/clipboardManager');
+            const responseText = clipboardManager.getResponse(commandName);
+
+            if (responseText) {
+                // Capture reference BEFORE delete
+                const referenceId = message.reference ? message.reference.messageId : null;
+
+                // Deletion Logic
+                // 1. If it's the bot's own message, it can always delete it (Guild or DM).
+                // 2. If it's someone else's message, bot needs MANAGE_MESSAGES permission in Guild to delete it.
+                if (message.author.id === client.user.id) {
+                    try { await message.delete(); } catch (e) { }
+                } else if (message.guild && message.guild.me.permissionsIn(message.channel).has('MANAGE_MESSAGES')) {
+                    try { await message.delete(); } catch (e) { }
+                }
+
+                // Logic:
+                // 1. If user replied to a message, Bot copies that reply (Replies to the same message)
+                // 2. If no reply, Bot just sends text (No ping, no mention)
+
+                if (referenceId) {
+                    try {
+                        const repliedMsg = await message.channel.messages.fetch(referenceId);
+                        if (repliedMsg) {
+                            await repliedMsg.reply({ content: responseText, allowedMentions: { repliedUser: true } });
+                        } else {
+                            await message.channel.send(responseText);
+                        }
+                    } catch (e) {
+                        // Fallback if message fetch failed
+                        await message.channel.send(responseText);
+                    }
+                } else {
+                    // No reply, just send text
+                    await message.channel.send(responseText);
+                }
+                return;
+            }
+        }
+        // --- CLIPBOARD MANAGER END ---
+
         if (!command) return;
 
         await command.execute(message, args, client);
